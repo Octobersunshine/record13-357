@@ -245,6 +245,109 @@ class CrosstabService:
         total = observed.sum()
         return (row_totals @ col_totals) / total
 
+    def cramers_v(
+        self,
+        df: pd.DataFrame,
+        row_var: str,
+        col_var: str,
+        correction: Optional[bool] = None,
+    ) -> Dict[str, Union[float, str]]:
+        chi2_result = self.chi_square_test(
+            df, row_var, col_var, correction=correction
+        )
+        chi2 = chi2_result["卡方统计量"]
+        n = chi2_result["期望频数表"].values.sum()
+        dof = chi2_result["自由度"]
+        n_rows, n_cols = chi2_result["期望频数表"].shape
+
+        k = min(n_rows, n_cols)
+        v = np.sqrt(chi2 / (n * (k - 1))) if n > 0 and k > 1 else 0.0
+
+        if correction:
+            phi_sq = max(0, chi2 / n - (k - 1) / (n - 1))
+            k_tilde = k - (k - 1) ** 2 / (n - 1)
+            v_corrected = np.sqrt(phi_sq / (k_tilde - 1)) if k_tilde > 1 else v
+        else:
+            v_corrected = v
+
+        if k == 2:
+            if v < 0.1:
+                strength = "极弱"
+            elif v < 0.3:
+                strength = "弱"
+            elif v < 0.5:
+                strength = "中等"
+            else:
+                strength = "强"
+        elif k == 3:
+            if v < 0.07:
+                strength = "极弱"
+            elif v < 0.21:
+                strength = "弱"
+            elif v < 0.35:
+                strength = "中等"
+            else:
+                strength = "强"
+        else:
+            if v < 0.06:
+                strength = "极弱"
+            elif v < 0.17:
+                strength = "弱"
+            elif v < 0.29:
+                strength = "中等"
+            else:
+                strength = "强"
+
+        result = {
+            "Cramér's V": float(v),
+            "校正后 Cramér's V": float(v_corrected),
+            "效应强度": strength,
+            "是否偏差校正": bool(correction) if correction is not None else False,
+        }
+        return result
+
+    def test_independence(
+        self,
+        df: pd.DataFrame,
+        row_var: str,
+        col_var: str,
+        correction: Optional[bool] = None,
+        alpha: float = 0.05,
+    ) -> Dict[str, Union[float, str, bool, pd.DataFrame]]:
+        chi2_result = self.chi_square_test(
+            df, row_var, col_var, correction=correction
+        )
+        cramers_result = self.cramers_v(
+            df, row_var, col_var, correction=correction
+        )
+
+        p_value = chi2_result["p值"]
+        is_independent = p_value > alpha
+
+        if is_independent:
+            conclusion = f"在 α={alpha} 显著性水平下，不能拒绝原假设，认为 '{row_var}' 与 '{col_var}' 相互独立"
+        else:
+            conclusion = f"在 α={alpha} 显著性水平下，拒绝原假设，认为 '{row_var}' 与 '{col_var}' 存在显著关联（效应强度：{cramers_result['效应强度']}）"
+
+        result = {
+            "原假设 H0": f"'{row_var}' 与 '{col_var}' 相互独立",
+            "备择假设 H1": f"'{row_var}' 与 '{col_var}' 不相互独立",
+            "显著性水平 α": alpha,
+            "卡方统计量": chi2_result["卡方统计量"],
+            "p值": chi2_result["p值"],
+            "自由度": chi2_result["自由度"],
+            "是否使用连续性校正": chi2_result["是否使用连续性校正"],
+            "Cramér's V": cramers_result["Cramér's V"],
+            "校正后 Cramér's V": cramers_result["校正后 Cramér's V"],
+            "效应强度": cramers_result["效应强度"],
+            "是否独立": is_independent,
+            "检验结论": conclusion,
+            "存在零频数": chi2_result["存在零频数"],
+            "最小期望频数": chi2_result["最小期望频数"],
+            "期望频数表": chi2_result["期望频数表"],
+        }
+        return result
+
     def full_report(
         self,
         df: pd.DataFrame,
@@ -252,6 +355,7 @@ class CrosstabService:
         col_var: str,
         margins_name: str = "合计",
         correction: Optional[bool] = None,
+        alpha: float = 0.05,
     ) -> dict:
         result = {}
         result["频数表"] = self.get_frequency_table(
@@ -266,8 +370,8 @@ class CrosstabService:
         result["总百分比"] = self.get_cell_percentage(
             df, row_var, col_var, margins=True, margins_name=margins_name
         )
-        result["卡方检验"] = self.chi_square_test(
-            df, row_var, col_var, correction=correction
+        result["独立性检验"] = self.test_independence(
+            df, row_var, col_var, correction=correction, alpha=alpha
         )
         result["检验方法建议"] = self.recommend_test(df, row_var, col_var)
         return result
@@ -345,7 +449,48 @@ def demo():
     print()
 
     print("=" * 60)
-    print("【9】零频数与连续性校正对比演示：")
+    print("【9】Cramér's V 效应量分析（性别 × 学历）：")
+    cv = service.cramers_v(df, "性别", "学历")
+    for k, v in cv.items():
+        if isinstance(v, float):
+            print(f"  {k}: {v:.4f}")
+        else:
+            print(f"  {k}: {v}")
+    print()
+
+    print("=" * 60)
+    print("【10】列联表独立性检验（性别 × 学历）：")
+    indep = service.test_independence(df, "性别", "学历", alpha=0.05)
+    for k, v in indep.items():
+        if isinstance(v, pd.DataFrame):
+            print(f"  {k}:")
+            print(v.round(4).to_string().replace("\n", "\n    "))
+        elif isinstance(v, float):
+            print(f"  {k}: {v:.6f}")
+        else:
+            print(f"  {k}: {v}")
+    print()
+
+    print("=" * 60)
+    print("【11】强关联数据示例演示（显著相关）：")
+    data_strong = {
+        "吸烟": (["是"] * 40 + ["否"] * 10 + ["是"] * 15 + ["否"] * 35),
+        "肺癌": (["是"] * 40 + ["是"] * 10 + ["否"] * 15 + ["否"] * 35),
+    }
+    df_strong = pd.DataFrame(data_strong)
+    indep_strong = service.test_independence(df_strong, "吸烟", "肺癌")
+    print(f"  频数表：")
+    print(pd.crosstab(df_strong["吸烟"], df_strong["肺癌"], margins=True).to_string().replace("\n", "\n    "))
+    print(f"  卡方统计量: {indep_strong['卡方统计量']:.4f}")
+    print(f"  p值: {indep_strong['p值']:.6e}")
+    cramers_v_value = indep_strong["Cramér's V"]
+    print(f"  Cramér's V: {cramers_v_value:.4f}")
+    print(f"  效应强度: {indep_strong['效应强度']}")
+    print(f"  检验结论: {indep_strong['检验结论']}")
+    print()
+
+    print("=" * 60)
+    print("【12】零频数与连续性校正对比演示：")
     data_2x2 = {
         "组别": ["A", "A", "A", "B", "B", "B", "B"],
         "结果": ["阳性", "阳性", "阴性", "阴性", "阴性", "阴性", "阳性"],
@@ -375,7 +520,7 @@ def demo():
     print()
 
     print("=" * 60)
-    print("【10】完整分析报告（性别 × 满意度）：")
+    print("【13】完整分析报告（性别 × 满意度）：")
     report = service.full_report(df, "性别", "满意度")
     for key, value in report.items():
         print(f"\n--- {key} ---")
@@ -386,6 +531,8 @@ def demo():
                 if isinstance(v, pd.DataFrame):
                     print(f"  {k}:")
                     print(v.round(4).to_string().replace("\n", "\n    "))
+                elif isinstance(v, float):
+                    print(f"  {k}: {v:.6f}")
                 else:
                     print(f"  {k}: {v}")
         else:
